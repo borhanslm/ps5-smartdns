@@ -63,7 +63,7 @@ install_xray() {
   rm -rf "$T"
 }
 
-SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}'); SSH_PORT=${SSH_PORT:-22}
+SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2}' | head -1 || true); SSH_PORT=${SSH_PORT:-22}
 MYIP=$(curl -4 -fsS --max-time 10 https://api.ipify.org || hostname -I | awk '{print $1}')
 
 # ------------------------------------------------------------------ foreign
