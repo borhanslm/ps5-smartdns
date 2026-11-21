@@ -2,7 +2,9 @@
 # PS5 Smart DNS helper
 DIR=/opt/ps5-smartdns
 cd "$DIR" || exit 1
-svc=ps5-smartdns; [ -f /etc/systemd/system/ps5dns-xray.service ] && svc=ps5dns-xray
+svc=ps5-smartdns
+[ -f /etc/systemd/system/ps5-smartdns.service ] || svc=ps5dns-xray   # tunnel-only server
+[ "${2:-}" = tunnel ] && svc=ps5dns-xray                             # e.g. ps5dns logs tunnel
 case "${1:-}" in
   login)          cat data/initial-login.txt 2>/dev/null || echo "No panel on this server." ;;
   reset-password) python3 app/app.py reset-password && systemctl restart ps5-smartdns ;;

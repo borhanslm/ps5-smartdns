@@ -1,4 +1,4 @@
-"""PS5 Smart DNS - DNS (dnsmasq) + SNI proxy (nginx) + web panel with users."""
+"""PS5 Smart DNS - DNS (dnsmasq) + SNI proxy (Xray) + web panel with users."""
 import hashlib
 import hmac
 import ipaddress
@@ -22,7 +22,6 @@ CONF = os.path.join(DATA, "config.json")
 USERS = os.path.join(DATA, "users.json")
 DOMAINS = os.path.join(DATA, "domains.txt")
 EXCLUDE = os.path.join(DATA, "exclude.txt")
-NGINX_CONF = os.path.join(APP_DIR, "nginx.conf")
 MANAGE_SERVICES = os.environ.get("MANAGE_SERVICES", "1") == "1"
 
 lock = threading.RLock()
@@ -92,6 +91,10 @@ def init_config():
             # local IP to listen on (e.g. 192.168.100.11 behind NAT). Empty = all addresses.
             # Binding to one IP avoids clashing with other programs (VPN panels) on port 53.
             "listen_ip": os.environ.get("LISTEN_IP", ""),
+            # share 80/443 with another service (website, VPN): see proxy_ports()
+            "share_ports": os.environ.get("SHARE_PORTS", "0") == "1",
+            "https_port": int(os.environ.get("HTTPS_PORT", "4443")),
+            "http_port": int(os.environ.get("HTTP_PORT", "8081")),
             # single = this server proxies traffic itself (must be outside Iran)
             # iran   = this server tunnels traffic over VLESS Reality to a foreign server
             "role": os.environ.get("ROLE", "single"),
@@ -134,47 +137,60 @@ def active_ips():
 
 
 # ---------------------------------------------------------------- services
-def xray_client_config(tunnel, domains, listen_ip=""):
-    """Iran role: sniff the domain on 80/443 and send listed domains through VLESS Reality."""
-    inbound = lambda tag, port, sniff: {
-        "tag": tag, "listen": listen_ip or "0.0.0.0", "port": port, "protocol": "dokodemo-door",
-        "settings": {"network": "tcp", "address": "127.0.0.1", "port": port},
+def proxy_ports(conf):
+    """Ports our proxy listens on. Normally 443/80. In shared mode (another service such as
+    a website or VPN already owns 80/443) we listen on hidden ports and only registered user
+    IPs are redirected there by nftables; everyone else still reaches the original service."""
+    if conf.get("share_ports"):
+        return int(conf.get("https_port", 4443)), int(conf.get("http_port", 8081))
+    return 443, 80
+
+
+def xray_config(conf, domains):
+    """Sniff the domain on 80/443. Listed domains -> tunnel (iran role) or direct (single role).
+    Anything else -> the service that originally owns the port (shared mode) or dropped."""
+    lip = conf.get("listen_ip") or "0.0.0.0"
+    https_port, http_port = proxy_ports(conf)
+    inbound = lambda tag, port, orig, sniff: {
+        "tag": tag, "listen": lip, "port": port, "protocol": "dokodemo-door",
+        "settings": {"network": "tcp", "address": "127.0.0.1", "port": orig},
         "sniffing": {"enabled": True, "destOverride": [sniff]}}
+    tunnel = conf.get("tunnel")
+    if conf.get("role") == "iran" and tunnel:
+        out = {"tag": "out", "protocol": "vless",
+               "settings": {"vnext": [{"address": tunnel["ip"], "port": int(tunnel["port"]),
+                                       "users": [{"id": tunnel["uuid"], "encryption": "none",
+                                                  "flow": "xtls-rprx-vision"}]}]},
+               "streamSettings": {"network": "tcp", "security": "reality",
+                                  "realitySettings": {"serverName": tunnel["sni"], "fingerprint": "chrome",
+                                                      "publicKey": tunnel["pbk"], "shortId": tunnel["sid"]}}}
+    else:
+        out = {"tag": "out", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}
+    outbounds = [out]
+    rules = [{"type": "field", "inboundTag": ["in443", "in80"],
+              "domain": [f"domain:{d}" for d in domains], "outboundTag": "out"}]
+    if conf.get("share_ports"):
+        outbounds += [
+            {"tag": "orig443", "protocol": "freedom", "settings": {"redirect": "127.0.0.1:443"}},
+            {"tag": "orig80", "protocol": "freedom", "settings": {"redirect": "127.0.0.1:80"}}]
+        rules += [{"type": "field", "inboundTag": ["in443"], "outboundTag": "orig443"},
+                  {"type": "field", "inboundTag": ["in80"], "outboundTag": "orig80"}]
+    else:
+        outbounds.append({"tag": "block", "protocol": "blackhole"})
+        rules.append({"type": "field", "inboundTag": ["in443", "in80"], "outboundTag": "block"})
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [inbound("in443", 443, "tls"), inbound("in80", 80, "http")],
-        "outbounds": [
-            {"tag": "tunnel", "protocol": "vless",
-             "settings": {"vnext": [{"address": tunnel["ip"], "port": int(tunnel["port"]),
-                                     "users": [{"id": tunnel["uuid"], "encryption": "none",
-                                                "flow": "xtls-rprx-vision"}]}]},
-             "streamSettings": {"network": "tcp", "security": "reality",
-                                "realitySettings": {"serverName": tunnel["sni"], "fingerprint": "chrome",
-                                                    "publicKey": tunnel["pbk"], "shortId": tunnel["sid"]}}},
-            {"tag": "block", "protocol": "blackhole"},
-        ],
-        "routing": {"domainStrategy": "AsIs", "rules": [
-            {"type": "field", "inboundTag": ["in443", "in80"],
-             "domain": [f"domain:{d}" for d in domains], "outboundTag": "tunnel"},
-            {"type": "field", "inboundTag": ["in443", "in80"], "outboundTag": "block"},
-        ]},
+        "inbounds": [inbound("in443", https_port, 443, "tls"), inbound("in80", http_port, 80, "http")],
+        "outbounds": outbounds,
+        "routing": {"domainStrategy": "AsIs", "rules": rules},
     }
 
 
 class Services:
     def __init__(self):
         self.dns = None
-        self.nginx = None   # nginx in single role, xray in iran role
+        self.proxy = None   # xray
         self.last_fw = None
-
-    @staticmethod
-    def role():
-        return load(CONF, {}).get("role", "single")
-
-    def proxy_cmd(self):
-        if self.role() == "iran":
-            return ["xray", "run", "-c", os.path.join(GEN, "xray.json")]
-        return ["nginx", "-c", NGINX_CONF, "-g", "daemon off;"]
 
     def generate(self):
         conf = load(CONF, {})
@@ -189,13 +205,37 @@ class Services:
         lines += [f"server=/{d}/1.1.1.1" for d in exclude]
         with open(os.path.join(GEN, "dnsmasq.conf"), "w") as f:
             f.write("\n".join(lines) + "\n")
-        with open(os.path.join(GEN, "allowed_443.map"), "w") as f:
-            f.writelines(f".{d} $ssl_preread_server_name:443;\n" for d in domains)
-        with open(os.path.join(GEN, "allowed_80.map"), "w") as f:
-            f.writelines(f".{d} 1;\n" for d in domains)
-        if conf.get("role") == "iran" and conf.get("tunnel"):
-            with open(os.path.join(GEN, "xray.json"), "w") as f:
-                json.dump(xray_client_config(conf["tunnel"], domains, conf.get("listen_ip", "")), f, indent=2)
+        with open(os.path.join(GEN, "xray.json"), "w") as f:
+            json.dump(xray_config(conf, domains), f, indent=2)
+
+    def firewall_script(self, conf, ips):
+        # Only packets addressed to THIS server are touched. Traffic other software intercepts
+        # transparently (e.g. a VPN panel's Xray proxying DNS to 8.8.8.8:53 via TPROXY) also
+        # passes these hooks, but its destination is not local, so it is left alone.
+        lip = conf.get("listen_ip")
+        dst = f"ip daddr {lip}" if lip else "fib daddr type local"
+        open_mode = conf.get("open_mode")
+        https_port, http_port = proxy_ports(conf)
+        s = "table inet smartdns\ndelete table inet smartdns\ntable inet smartdns {\n"
+        s += "  set allowed { type ipv4_addr;%s }\n" % (
+            " elements = { %s };" % ", ".join(ips) if ips else "")
+        who = "" if open_mode else "ip saddr @allowed "
+        if conf.get("share_ports"):
+            # registered users' 80/443 -> our hidden ports; everyone else untouched
+            s += "  chain prerouting {\n    type nat hook prerouting priority -110; policy accept;\n"
+            s += f"    {dst} tcp dport 443 {who}redirect to :{https_port}\n"
+            s += f"    {dst} tcp dport 80 {who}redirect to :{http_port}\n"
+            s += "  }\n"
+        s += "  chain input {\n    type filter hook input priority -10; policy accept;\n"
+        s += '    iif "lo" accept\n'
+        if not open_mode:
+            s += f"    {dst} meta l4proto {{ tcp, udp }} th dport 53 ip saddr != @allowed drop\n"
+            s += f"    {dst} tcp dport {{ {http_port}, {https_port} }} ip saddr != @allowed drop\n"
+        if not lip:
+            s += ("    meta nfproto ipv6 fib daddr type local meta l4proto { tcp, udp } "
+                  f"th dport {{ 53, {http_port}, {https_port} }} drop\n")
+        s += "  }\n}\n"
+        return s
 
     def firewall(self, force=False):
         conf = load(CONF, {})
@@ -203,31 +243,14 @@ class Services:
         state = (conf.get("open_mode"), tuple(ips))
         if state == self.last_fw and not force:
             return
-        # Only packets addressed to THIS server are filtered. Traffic that other software
-        # intercepts transparently (e.g. a VPN panel's Xray proxying clients' DNS to 8.8.8.8:53
-        # via TPROXY) also passes the input hook, but its destination is not local, so it is
-        # never touched.
-        lip = conf.get("listen_ip")
-        dst = f"ip daddr {lip}" if lip else "fib daddr type local"
-        # no allowed IPs yet -> block every IPv4 client on these ports
-        src = "ip saddr != @allowed" if ips else "meta nfproto ipv4"
-        script = "table inet smartdns\ndelete table inet smartdns\ntable inet smartdns {\n"
-        if not conf.get("open_mode") and ips:
-            script += "  set allowed { type ipv4_addr; elements = { %s } }\n" % ", ".join(ips)
-        script += "  chain input {\n    type filter hook input priority -10; policy accept;\n"
-        script += '    iif "lo" accept\n'
-        if not conf.get("open_mode"):
-            script += f"    {dst} meta l4proto {{ tcp, udp }} th dport 53 {src} drop\n"
-            script += f"    {dst} tcp dport {{ 80, 443 }} {src} drop\n"
-        if not lip:
-            script += ("    meta nfproto ipv6 fib daddr type local meta l4proto { tcp, udp } "
-                       "th dport { 53, 80, 443 } drop\n")
-        script += "  }\n}\n"
+        script = self.firewall_script(conf, ips)
         if MANAGE_SERVICES:
             r = subprocess.run(["nft", "-f", "-"], input=script, text=True, capture_output=True)
             if r.returncode != 0:
                 print("nft error:", r.stderr, file=sys.stderr)
                 return
+        else:
+            self.last_script = script
         self.last_fw = state
         print(f"firewall: {len(ips)} allowed IPs, open_mode={conf.get('open_mode')}")
 
@@ -238,29 +261,26 @@ class Services:
         self.dns = subprocess.Popen(["dnsmasq", "-k", "--log-facility=-",
                                      "-C", os.path.join(GEN, "dnsmasq.conf")])
 
-    def start_nginx(self):
-        if self.nginx and self.nginx.poll() is None:
-            self.nginx.terminate()
+    def start_proxy(self):
+        if self.proxy and self.proxy.poll() is None:
+            self.proxy.terminate()
             try:
-                self.nginx.wait(10)
+                self.proxy.wait(10)
             except subprocess.TimeoutExpired:
-                self.nginx.kill()
-        self.nginx = subprocess.Popen(self.proxy_cmd())
+                self.proxy.kill()
+        self.proxy = subprocess.Popen(["xray", "run", "-c", os.path.join(GEN, "xray.json")])
 
     def apply(self):
         """Regenerate configs and restart DNS + proxy."""
         with lock:
             self.generate()
             if MANAGE_SERVICES:
-                self.start_dns()
-                if self.role() == "iran":
-                    t = subprocess.run(["xray", "run", "-test", "-c", os.path.join(GEN, "xray.json")],
-                                       capture_output=True, text=True)
-                else:
-                    t = subprocess.run(["nginx", "-t", "-c", NGINX_CONF], capture_output=True, text=True)
+                t = subprocess.run(["xray", "run", "-test", "-c", os.path.join(GEN, "xray.json")],
+                                   capture_output=True, text=True)
                 if t.returncode != 0:
                     return t.stdout + t.stderr
-                self.start_nginx()
+                self.start_dns()
+                self.start_proxy()
             self.firewall(force=True)
         return None
 
@@ -272,9 +292,9 @@ class Services:
                     if self.dns is None or self.dns.poll() is not None:
                         print("dnsmasq stopped, restarting", file=sys.stderr)
                         self.start_dns()
-                    if self.nginx is None or self.nginx.poll() is not None:
+                    if self.proxy is None or self.proxy.poll() is not None:
                         print("proxy stopped, restarting", file=sys.stderr)
-                        self.start_nginx()
+                        self.start_proxy()
                 self.firewall()  # drops expired users
 
 
@@ -589,7 +609,7 @@ def main():
     app = create_app()
     err = svc.apply()
     if err:
-        print("nginx config error:", err, file=sys.stderr)
+        print("proxy config error:", err, file=sys.stderr)
     threading.Thread(target=svc.watchdog, daemon=True).start()
     conf = load(CONF, {})
     print(f"Panel: http://{conf['server_ip']}:{conf['panel_port']}/{conf['admin_path']}/")

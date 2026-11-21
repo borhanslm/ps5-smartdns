@@ -39,9 +39,7 @@ apt-get update -y -qq
 BASE="curl git unzip openssl ufw nftables ca-certificates"
 case "$ROLE" in
   foreign) apt-get install -y -qq $BASE ;;
-  iran)    apt-get install -y -qq $BASE dnsmasq-base python3 python3-flask python3-waitress ;;
-  single)  apt-get install -y -qq $BASE dnsmasq-base python3 python3-flask python3-waitress nginx libnginx-mod-stream
-           systemctl disable --now nginx >/dev/null 2>&1 || true ;;
+  iran|single) apt-get install -y -qq $BASE dnsmasq-base python3 python3-flask python3-waitress ;;
   *) die "ROLE must be foreign, iran or single" ;;
 esac
 
@@ -143,22 +141,36 @@ fi
 ip -4 -o addr show | grep -F "inet $LISTEN_IP/" >/dev/null || die "$LISTEN_IP is not an address of this server. Set LISTEN_IP=..."
 [ "$LISTEN_IP" != "$MYIP" ] && echo "Note: this server is behind NAT ($LISTEN_IP -> $MYIP). Forward ports 53 (TCP+UDP), 80, 443 and the panel port on your router to $LISTEN_IP."
 
-# Stop before changing anything if a needed port is taken on that IP (or on all addresses)
+# Who holds a TCP/UDP port on LISTEN_IP (or on all addresses)? Empty = free.
+port_user() {
+  ss -tulnpH 2>/dev/null | awk -v p="$1" -v ip="$LISTEN_IP" \
+    '$5==ip":"p || $5=="0.0.0.0:"p || $5=="*:"p || $5=="[::]:"p' \
+    | { grep -o 'users:(("[^"]*' || true; } | cut -d'"' -f2 | sort -u | tr '\n' ' '
+}
+
+# Stop before changing anything if a needed port is taken.
+# 53 and the panel port must be free. If 80/443 belong to another service (a website, a VPN),
+# we share them: our proxy listens on hidden ports and only registered users are redirected.
+SHARE_PORTS="${SHARE_PORTS:-0}"; HTTPS_PORT="${HTTPS_PORT:-4443}"; HTTP_PORT="${HTTP_PORT:-8081}"
 if ! systemctl is-active --quiet ps5-smartdns; then
   P_PANEL=$( [ -f "$DIR/.env" ] && grep '^PANEL_PORT=' "$DIR/.env" | cut -d= -f2 || echo "$PANEL_PORT")
-  for p in 53 80 443 "$P_PANEL"; do
-    used=$(ss -tulnpH 2>/dev/null | awk -v p="$p" -v ip="$LISTEN_IP" \
-      '$5==ip":"p || $5=="0.0.0.0:"p || $5=="*:"p || $5=="[::]:"p' \
-      | { grep -o 'users:(("[^"]*' || true; } | cut -d'"' -f2 | sort -u | tr '\n' ' ')
-    if [ -n "$used" ]; then
-      [ "$p" = "$P_PANEL" ] && die "panel port $p is used by: $used. Re-run with another, e.g. PANEL_PORT=2096"
-      die "port $p on $LISTEN_IP is used by: $used. The DNS server needs 53, 80 and 443 free."
-    fi
-  done
+  u=$(port_user 53); [ -n "$u" ] && die "port 53 on $LISTEN_IP is used by: $u. The DNS server needs it."
+  u=$(port_user "$P_PANEL"); [ -n "$u" ] && die "panel port $P_PANEL is used by: $u. Re-run with e.g. PANEL_PORT=2096"
+  u80=$(port_user 80); u443=$(port_user 443)
+  if [ -n "$u80$u443" ]; then
+    SHARE_PORTS=1
+    echo "Ports 80/443 are used by: $u80$u443-> sharing them: registered users are redirected to"
+    echo "hidden ports $HTTPS_PORT/$HTTP_PORT; everyone else keeps reaching the existing service."
+  fi
+  if [ "$SHARE_PORTS" = 1 ]; then
+    for p in "$HTTPS_PORT" "$HTTP_PORT"; do
+      u=$(port_user "$p"); [ -n "$u" ] && die "port $p is used by: $u. Re-run with HTTPS_PORT=... HTTP_PORT=..."
+    done
+  fi
 fi
 TUNNEL=""
+install_xray
 if [ "$ROLE" = iran ]; then
-  install_xray
   [ -n "${LINK:-}" ] || read -rp "Paste the link from the foreign server (ps5dns://...): " LINK
   TUNNEL=$(printf %s "${LINK#ps5dns://}" | base64 -d 2>/dev/null) || die "invalid link"
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); [d[k] for k in ("ip","port","uuid","pbk","sid","sni")]' "$TUNNEL" \
@@ -171,6 +183,9 @@ if [ ! -f "$DIR/.env" ]; then
   {
     echo "SERVER_IP=$MYIP"
     echo "LISTEN_IP=$LISTEN_IP"
+    echo "SHARE_PORTS=$SHARE_PORTS"
+    echo "HTTPS_PORT=$HTTPS_PORT"
+    echo "HTTP_PORT=$HTTP_PORT"
     echo "PANEL_PORT=$PANEL_PORT"
     echo "ROLE=$ROLE"
     if [ -n "$TUNNEL" ]; then echo "TUNNEL='$TUNNEL'"; fi
@@ -200,6 +215,9 @@ if [ "$NO_FIREWALL" != 1 ] && ufw status 2>/dev/null | grep -q "Status: active";
   ufw allow 53 >/dev/null
   ufw allow 80/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
+  # shared mode: redirected traffic arrives on the hidden ports
+  ufw allow "$(grep '^HTTPS_PORT=' "$DIR/.env" | cut -d= -f2)"/tcp >/dev/null
+  ufw allow "$(grep '^HTTP_PORT=' "$DIR/.env" | cut -d= -f2)"/tcp >/dev/null
   ufw allow "$PANEL_PORT"/tcp >/dev/null
 fi
 
