@@ -165,7 +165,7 @@ def xray_config(conf, domains):
                                   "realitySettings": {"serverName": tunnel["sni"], "fingerprint": "chrome",
                                                       "publicKey": tunnel["pbk"], "shortId": tunnel["sid"]}}}
     else:
-        out = {"tag": "out", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}
+        out = {"tag": "out", "protocol": "freedom", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}}
     outbounds = [out]
     rules = [{"type": "field", "inboundTag": ["in443", "in80"],
               "domain": [f"domain:{d}" for d in domains], "outboundTag": "out"}]

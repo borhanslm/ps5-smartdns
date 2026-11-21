@@ -89,7 +89,7 @@ if [ "$ROLE" = foreign ]; then
       "realitySettings": {"dest": "$REALITY_SNI:443", "serverNames": ["$REALITY_SNI"],
                           "privateKey": "$PRIV", "shortIds": ["$SID"]}}
   }],
-  "outbounds": [{"protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}]
+  "outbounds": [{"protocol": "freedom", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}}]
 }
 EOF
     JSON="{\"ip\":\"$MYIP\",\"port\":$TUNNEL_PORT,\"uuid\":\"$UUID\",\"pbk\":\"$PUB\",\"sid\":\"$SID\",\"sni\":\"$REALITY_SNI\"}"
