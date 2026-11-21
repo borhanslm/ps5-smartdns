@@ -130,6 +130,18 @@ EOF
 fi
 
 # ------------------------------------------------------------------ iran / single
+# Stop before changing anything if a needed port belongs to another program
+# (systemd-resolved on 127.0.0.53/54 is fine; it is moved off port 53 below).
+if ! systemctl is-active --quiet ps5-smartdns; then
+  P_PANEL=$( [ -f "$DIR/.env" ] && grep '^PANEL_PORT=' "$DIR/.env" | cut -d= -f2 || echo "$PANEL_PORT")
+  for p in 53 80 443 "$P_PANEL"; do
+    used=$(ss -tulnpH 2>/dev/null | awk -v p="$p" '$5 ~ ":"p"$" && $5 !~ /^127\.0\.0\.5[34]/' | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | sort -u | tr '\n' ' ')
+    if [ -n "$used" ]; then
+      [ "$p" = "$P_PANEL" ] && die "panel port $p is used by: $used. Re-run with another, e.g. PANEL_PORT=2096"
+      die "port $p is used by: $used. The DNS server needs 53, 80 and 443 free on this server."
+    fi
+  done
+fi
 TUNNEL=""
 if [ "$ROLE" = iran ]; then
   install_xray
@@ -171,14 +183,16 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-c "Firewall"
-ufw allow "$SSH_PORT"/tcp >/dev/null
-ufw allow 53 >/dev/null
-ufw allow 80/tcp >/dev/null
-ufw allow 443/tcp >/dev/null
-ufw allow "$PANEL_PORT"/tcp >/dev/null
-ufw default deny incoming >/dev/null && ufw --force enable >/dev/null
-# Per-user access to 53/80/443 is enforced by the panel (nftables table "smartdns").
+# Per-user access to 53/80/443 is enforced by the panel itself (its own nftables table
+# "smartdns", which touches only those ports). ufw is never enabled or tightened here,
+# so other services on this server (VPN panels, L2TP, ...) keep working.
+if [ "$NO_FIREWALL" != 1 ] && ufw status 2>/dev/null | grep -q "Status: active"; then
+  c "Firewall (ufw is active: opening our ports)"
+  ufw allow 53 >/dev/null
+  ufw allow 80/tcp >/dev/null
+  ufw allow 443/tcp >/dev/null
+  ufw allow "$PANEL_PORT"/tcp >/dev/null
+fi
 
 systemctl daemon-reload
 systemctl enable --now ps5-smartdns >/dev/null
