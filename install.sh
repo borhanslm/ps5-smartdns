@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO="https://github.com/borhanslm/ps5-smartdns.git"
 DIR=/opt/ps5-smartdns
-XRAY_VERSION="v25.3.6"
+XRAY_VERSION="v26.10.31"
 PANEL_PORT="${PANEL_PORT:-2053}"
 REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
 TUNNEL_PORT="${TUNNEL_PORT:-443}"   # foreign role: use another port if 443 is taken (e.g. a website)
@@ -50,7 +50,8 @@ cd "$DIR"
 ln -sf "$DIR/ps5dns" /usr/local/bin/ps5dns && chmod +x "$DIR/ps5dns"
 
 install_xray() {
-  command -v xray >/dev/null && return
+  # skip only if the pinned version is already installed (otherwise install / upgrade)
+  if command -v xray >/dev/null && xray version 2>/dev/null | head -1 | grep -q "Xray ${XRAY_VERSION#v} "; then return; fi
   c "Installing Xray $XRAY_VERSION"
   case "$(uname -m)" in
     x86_64) A=64 ;; aarch64) A=arm64-v8a ;; *) die "unsupported CPU $(uname -m)" ;;
