@@ -3,9 +3,10 @@
 playstation.com
 playstation.net
 sonyentertainmentnetwork.com
-# EA (EA FC, Battlefield, Apex)
+# EA (EA FC, Battlefield, Apex Legends)
 ea.com
 origin.com
+respawn.com
 # Activision (Call of Duty)
 activision.com
 callofduty.com
