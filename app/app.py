@@ -89,6 +89,9 @@ def init_config():
             "secret": secrets.token_hex(32),
             "admin_path": secrets.token_hex(5),
             "open_mode": False,
+            # local IP to listen on (e.g. 192.168.100.11 behind NAT). Empty = all addresses.
+            # Binding to one IP avoids clashing with other programs (VPN panels) on port 53.
+            "listen_ip": os.environ.get("LISTEN_IP", ""),
             # single = this server proxies traffic itself (must be outside Iran)
             # iran   = this server tunnels traffic over VLESS Reality to a foreign server
             "role": os.environ.get("ROLE", "single"),
@@ -131,10 +134,10 @@ def active_ips():
 
 
 # ---------------------------------------------------------------- services
-def xray_client_config(tunnel, domains):
+def xray_client_config(tunnel, domains, listen_ip=""):
     """Iran role: sniff the domain on 80/443 and send listed domains through VLESS Reality."""
     inbound = lambda tag, port, sniff: {
-        "tag": tag, "listen": "0.0.0.0", "port": port, "protocol": "dokodemo-door",
+        "tag": tag, "listen": listen_ip or "0.0.0.0", "port": port, "protocol": "dokodemo-door",
         "settings": {"network": "tcp", "address": "127.0.0.1", "port": port},
         "sniffing": {"enabled": True, "destOverride": [sniff]}}
     return {
@@ -180,6 +183,8 @@ class Services:
         os.makedirs(GEN, exist_ok=True)
         lines = ["no-resolv", "no-hosts", "domain-needed", "bogus-priv", "filter-AAAA",
                  "cache-size=10000", "server=1.1.1.1", "server=8.8.8.8"]
+        if conf.get("listen_ip"):
+            lines += ["bind-interfaces", f"listen-address={conf['listen_ip']}"]
         lines += [f"address=/{d}/{ip}" for d in domains]
         lines += [f"server=/{d}/1.1.1.1" for d in exclude]
         with open(os.path.join(GEN, "dnsmasq.conf"), "w") as f:
@@ -190,7 +195,7 @@ class Services:
             f.writelines(f".{d} 1;\n" for d in domains)
         if conf.get("role") == "iran" and conf.get("tunnel"):
             with open(os.path.join(GEN, "xray.json"), "w") as f:
-                json.dump(xray_client_config(conf["tunnel"], domains), f, indent=2)
+                json.dump(xray_client_config(conf["tunnel"], domains, conf.get("listen_ip", "")), f, indent=2)
 
     def firewall(self, force=False):
         conf = load(CONF, {})
@@ -198,6 +203,12 @@ class Services:
         state = (conf.get("open_mode"), tuple(ips))
         if state == self.last_fw and not force:
             return
+        # Only packets addressed to THIS server are filtered. Traffic that other software
+        # intercepts transparently (e.g. a VPN panel's Xray proxying clients' DNS to 8.8.8.8:53
+        # via TPROXY) also passes the input hook, but its destination is not local, so it is
+        # never touched.
+        lip = conf.get("listen_ip")
+        dst = f"ip daddr {lip}" if lip else "fib daddr type local"
         # no allowed IPs yet -> block every IPv4 client on these ports
         src = "ip saddr != @allowed" if ips else "meta nfproto ipv4"
         script = "table inet smartdns\ndelete table inet smartdns\ntable inet smartdns {\n"
@@ -206,9 +217,11 @@ class Services:
         script += "  chain input {\n    type filter hook input priority -10; policy accept;\n"
         script += '    iif "lo" accept\n'
         if not conf.get("open_mode"):
-            script += f"    meta l4proto {{ tcp, udp }} th dport 53 {src} drop\n"
-            script += f"    tcp dport {{ 80, 443 }} {src} drop\n"
-        script += "    meta nfproto ipv6 meta l4proto { tcp, udp } th dport { 53, 80, 443 } drop\n"
+            script += f"    {dst} meta l4proto {{ tcp, udp }} th dport 53 {src} drop\n"
+            script += f"    {dst} tcp dport {{ 80, 443 }} {src} drop\n"
+        if not lip:
+            script += ("    meta nfproto ipv6 fib daddr type local meta l4proto { tcp, udp } "
+                       "th dport { 53, 80, 443 } drop\n")
         script += "  }\n}\n"
         if MANAGE_SERVICES:
             r = subprocess.run(["nft", "-f", "-"], input=script, text=True, capture_output=True)

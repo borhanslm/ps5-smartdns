@@ -130,15 +130,29 @@ EOF
 fi
 
 # ------------------------------------------------------------------ iran / single
-# Stop before changing anything if a needed port belongs to another program
-# (systemd-resolved on 127.0.0.53/54 is fine; it is moved off port 53 below).
+# The DNS and proxy listen on ONE local IP (the one with the default route), so they never
+# clash with systemd-resolved (127.0.0.53) or with sockets other software binds to other
+# addresses, e.g. a VPN panel's transparent-proxy sockets on 8.8.8.8:53.
+if [ -f "$DIR/.env" ] && grep -q '^LISTEN_IP=' "$DIR/.env"; then
+  LISTEN_IP=$(grep '^LISTEN_IP=' "$DIR/.env" | cut -d= -f2)
+fi
+if [ -z "${LISTEN_IP:-}" ]; then
+  LISTEN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')
+  [ -t 0 ] && read -rp "Local IP to listen on [$LISTEN_IP]: " IN && LISTEN_IP=${IN:-$LISTEN_IP}
+fi
+ip -4 addr show | grep -q "inet $LISTEN_IP/" || die "$LISTEN_IP is not an address of this server. Set LISTEN_IP=..."
+[ "$LISTEN_IP" != "$MYIP" ] && echo "Note: this server is behind NAT ($LISTEN_IP -> $MYIP). Forward ports 53 (TCP+UDP), 80, 443 and the panel port on your router to $LISTEN_IP."
+
+# Stop before changing anything if a needed port is taken on that IP (or on all addresses)
 if ! systemctl is-active --quiet ps5-smartdns; then
   P_PANEL=$( [ -f "$DIR/.env" ] && grep '^PANEL_PORT=' "$DIR/.env" | cut -d= -f2 || echo "$PANEL_PORT")
   for p in 53 80 443 "$P_PANEL"; do
-    used=$(ss -tulnpH 2>/dev/null | awk -v p="$p" '$5 ~ ":"p"$" && $5 !~ /^127\.0\.0\.5[34]/' | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | sort -u | tr '\n' ' ')
+    used=$(ss -tulnpH 2>/dev/null | awk -v p="$p" -v ip="$LISTEN_IP" \
+      '$5==ip":"p || $5=="0.0.0.0:"p || $5=="*:"p || $5=="[::]:"p' \
+      | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | sort -u | tr '\n' ' ')
     if [ -n "$used" ]; then
       [ "$p" = "$P_PANEL" ] && die "panel port $p is used by: $used. Re-run with another, e.g. PANEL_PORT=2096"
-      die "port $p is used by: $used. The DNS server needs 53, 80 and 443 free on this server."
+      die "port $p on $LISTEN_IP is used by: $used. The DNS server needs 53, 80 and 443 free."
     fi
   done
 fi
@@ -151,17 +165,12 @@ if [ "$ROLE" = iran ]; then
     || die "invalid link"
 fi
 
-# free port 53 (Ubuntu's systemd-resolved stub listener)
-if systemctl is-active --quiet systemd-resolved; then
-  mkdir -p /etc/systemd/resolved.conf.d
-  printf '[Resolve]\nDNSStubListener=no\nDNS=1.1.1.1 8.8.8.8\n' > /etc/systemd/resolved.conf.d/ps5dns.conf
-  ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-  systemctl restart systemd-resolved
-fi
+# systemd-resolved stays as it is: we only bind $LISTEN_IP:53, not 127.0.0.53.
 
 if [ ! -f "$DIR/.env" ]; then
   {
     echo "SERVER_IP=$MYIP"
+    echo "LISTEN_IP=$LISTEN_IP"
     echo "PANEL_PORT=$PANEL_PORT"
     echo "ROLE=$ROLE"
     if [ -n "$TUNNEL" ]; then echo "TUNNEL='$TUNNEL'"; fi
