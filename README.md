@@ -39,6 +39,7 @@ git clone https://github.com/borhanslm/ps5-smartdns.git /opt/ps5-smartdns && bas
 
 Optional, non-interactive: `ROLE=foreign IRAN_IP=1.2.3.4` (443 open only to the Iran server),
 `ROLE=iran LINK=ps5dns://...`, `PANEL_PORT=2053`.
+If the foreign server already runs a website on 443, use `TUNNEL_PORT=8443 NO_FIREWALL=1`.
 
 ## Panel
 
