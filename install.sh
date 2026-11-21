@@ -140,7 +140,7 @@ if [ -z "${LISTEN_IP:-}" ]; then
   LISTEN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')
   [ -t 0 ] && read -rp "Local IP to listen on [$LISTEN_IP]: " IN && LISTEN_IP=${IN:-$LISTEN_IP}
 fi
-ip -4 addr show | grep -q "inet $LISTEN_IP/" || die "$LISTEN_IP is not an address of this server. Set LISTEN_IP=..."
+ip -4 -o addr show | grep -F "inet $LISTEN_IP/" >/dev/null || die "$LISTEN_IP is not an address of this server. Set LISTEN_IP=..."
 [ "$LISTEN_IP" != "$MYIP" ] && echo "Note: this server is behind NAT ($LISTEN_IP -> $MYIP). Forward ports 53 (TCP+UDP), 80, 443 and the panel port on your router to $LISTEN_IP."
 
 # Stop before changing anything if a needed port is taken on that IP (or on all addresses)
@@ -149,7 +149,7 @@ if ! systemctl is-active --quiet ps5-smartdns; then
   for p in 53 80 443 "$P_PANEL"; do
     used=$(ss -tulnpH 2>/dev/null | awk -v p="$p" -v ip="$LISTEN_IP" \
       '$5==ip":"p || $5=="0.0.0.0:"p || $5=="*:"p || $5=="[::]:"p' \
-      | grep -o 'users:(("[^"]*' | cut -d'"' -f2 | sort -u | tr '\n' ' ')
+      | { grep -o 'users:(("[^"]*' || true; } | cut -d'"' -f2 | sort -u | tr '\n' ' ')
     if [ -n "$used" ]; then
       [ "$p" = "$P_PANEL" ] && die "panel port $p is used by: $used. Re-run with another, e.g. PANEL_PORT=2096"
       die "port $p on $LISTEN_IP is used by: $used. The DNS server needs 53, 80 and 443 free."
