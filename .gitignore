@@ -1,0 +1,4 @@
+data/
+.env
+tunnel-link.txt
+__pycache__/

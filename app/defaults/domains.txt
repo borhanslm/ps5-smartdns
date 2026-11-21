@@ -1,0 +1,26 @@
+# Domains routed through this server. Subdomains are included automatically.
+# Sony / PlayStation
+playstation.com
+playstation.net
+sonyentertainmentnetwork.com
+# EA (EA FC, Battlefield, Apex)
+ea.com
+origin.com
+# Activision (Call of Duty)
+activision.com
+callofduty.com
+demonware.net
+# Epic Games (Fortnite)
+epicgames.com
+epicgames.dev
+# Ubisoft
+ubisoft.com
+ubi.com
+ubisoftconnect.com
+# Rockstar (GTA Online, RDR2)
+rockstargames.com
+# Bungie (Destiny)
+bungie.net
+# 2K / Bethesda
+2k.com
+bethesda.net

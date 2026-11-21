@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# PS5 Smart DNS helper
+DIR=/opt/ps5-smartdns
+cd "$DIR" || exit 1
+svc=ps5-smartdns; [ -f /etc/systemd/system/ps5dns-xray.service ] && svc=ps5dns-xray
+case "${1:-}" in
+  login)          cat data/initial-login.txt 2>/dev/null || echo "No panel on this server." ;;
+  reset-password) python3 app/app.py reset-password && systemctl restart ps5-smartdns ;;
+  link)           cat tunnel-link.txt 2>/dev/null || echo "No tunnel link (only on the foreign server)." ;;
+  status)         systemctl status "$svc" --no-pager ;;
+  logs)           journalctl -u "$svc" -f -n 100 ;;
+  restart)        systemctl restart "$svc" && echo restarted ;;
+  update)         git pull --ff-only && systemctl restart "$svc" && echo updated ;;
+  uninstall)
+    read -rp "Remove PS5 Smart DNS and all its data? [y/N] " a; [ "$a" = y ] || exit 0
+    systemctl disable --now ps5-smartdns ps5dns-xray 2>/dev/null
+    rm -f /etc/systemd/system/ps5-smartdns.service /etc/systemd/system/ps5dns-xray.service /usr/local/bin/ps5dns
+    nft delete table inet smartdns 2>/dev/null
+    systemctl daemon-reload; rm -rf "$DIR"; echo removed ;;
+  *) echo "usage: ps5dns {login|reset-password|link|status|logs|restart|update|uninstall}" ;;
+esac
