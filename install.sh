@@ -7,6 +7,7 @@
 #   iran    : VPS inside Iran. DNS + web panel; tunnels game traffic to the foreign server.
 #   single  : one VPS outside Iran doing everything (no tunnel).
 # Non-interactive: ROLE=foreign|iran|single  LINK=<link from foreign>  PANEL_PORT=2053  IRAN_IP=<ip>
+#                  TUNNEL_PORT=8443 (foreign, if 443 is taken)  NO_FIREWALL=1 (leave ufw alone)
 set -euo pipefail
 
 REPO="https://github.com/borhanslm/ps5-smartdns.git"
@@ -14,6 +15,8 @@ DIR=/opt/ps5-smartdns
 XRAY_VERSION="v25.3.6"
 PANEL_PORT="${PANEL_PORT:-2053}"
 REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
+TUNNEL_PORT="${TUNNEL_PORT:-443}"   # foreign role: use another port if 443 is taken (e.g. a website)
+NO_FIREWALL="${NO_FIREWALL:-0}"     # 1 = do not touch ufw (server already runs other services)
 
 c() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mError: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -65,6 +68,9 @@ MYIP=$(curl -4 -fsS --max-time 10 https://api.ipify.org || hostname -I | awk '{p
 
 # ------------------------------------------------------------------ foreign
 if [ "$ROLE" = foreign ]; then
+  if [ ! -f "$DIR/tunnel-link.txt" ] && ss -tln | awk '{print $4}' | grep -qE "[:.]$TUNNEL_PORT\$"; then
+    die "port $TUNNEL_PORT is already in use. Re-run with another port, e.g. TUNNEL_PORT=8443"
+  fi
   install_xray
   mkdir -p /usr/local/etc/xray
   if [ ! -f "$DIR/tunnel-link.txt" ]; then
@@ -78,7 +84,7 @@ if [ "$ROLE" = foreign ]; then
 {
   "log": {"loglevel": "warning"},
   "inbounds": [{
-    "port": 443, "protocol": "vless",
+    "port": $TUNNEL_PORT, "protocol": "vless",
     "settings": {"clients": [{"id": "$UUID", "flow": "xtls-rprx-vision"}], "decryption": "none"},
     "streamSettings": {"network": "tcp", "security": "reality",
       "realitySettings": {"dest": "$REALITY_SNI:443", "serverNames": ["$REALITY_SNI"],
@@ -87,7 +93,7 @@ if [ "$ROLE" = foreign ]; then
   "outbounds": [{"protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}]
 }
 EOF
-    JSON="{\"ip\":\"$MYIP\",\"port\":443,\"uuid\":\"$UUID\",\"pbk\":\"$PUB\",\"sid\":\"$SID\",\"sni\":\"$REALITY_SNI\"}"
+    JSON="{\"ip\":\"$MYIP\",\"port\":$TUNNEL_PORT,\"uuid\":\"$UUID\",\"pbk\":\"$PUB\",\"sid\":\"$SID\",\"sni\":\"$REALITY_SNI\"}"
     echo "ps5dns://$(printf %s "$JSON" | base64 -w0)" > "$DIR/tunnel-link.txt"
     chmod 600 "$DIR/tunnel-link.txt"
   fi
@@ -105,11 +111,13 @@ EOF
   systemctl daemon-reload && systemctl enable --now ps5dns-xray >/dev/null
   systemctl restart ps5dns-xray
 
-  c "Firewall"
-  ufw allow "$SSH_PORT"/tcp >/dev/null
-  if [ -n "${IRAN_IP:-}" ]; then ufw allow from "$IRAN_IP" to any port 443 proto tcp >/dev/null
-  else ufw allow 443/tcp >/dev/null; fi
-  ufw default deny incoming >/dev/null && ufw --force enable >/dev/null
+  if [ "$NO_FIREWALL" != 1 ]; then
+    c "Firewall"
+    ufw allow "$SSH_PORT"/tcp >/dev/null
+    if [ -n "${IRAN_IP:-}" ]; then ufw allow from "$IRAN_IP" to any port "$TUNNEL_PORT" proto tcp >/dev/null
+    else ufw allow "$TUNNEL_PORT"/tcp >/dev/null; fi
+    ufw default deny incoming >/dev/null && ufw --force enable >/dev/null
+  fi
 
   echo
   c "Foreign server ready. Copy this link; the Iran installer will ask for it:"
